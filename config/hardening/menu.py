@@ -2,13 +2,13 @@
 # Graphical Kickstart Script
 #
 # This script was written by Frank Caviggia
-# Last update was 8 April 2017
+# Last update was 13 May 2017
 #
 # Author: Frank Caviggia (fcaviggia@gmail.com)
 # Copyright: Frank Caviggia, (C) 2016
 # License: GPLv2
 
-import os,sys,re,crypt,random
+import os,sys,re,crypt,random,pyudev
 try:
 	os.environ['DISPLAY']
 	import pygtk,gtk
@@ -280,13 +280,21 @@ class Display_Menu:
 		self.fips_kernel.set_active(True)
 		self.encrypt.pack_start(self.fips_kernel, False, True, 0)
 
-                
 		self.nousb_kernel = gtk.CheckButton('Disable USB (nousb)')
 		self.nousb_kernel.set_active(False)
 		self.encrypt.pack_start(self.nousb_kernel, False, True, 0)
 
+		self.lock_root = gtk.CheckButton('Lock root')
+		self.lock_root.set_active(True)
+		self.encrypt.pack_start(self.lock_root, False, True, 0)
+
 		self.vbox.add(self.encrypt)
 
+		# By default, do not disable USB support if a USB keyboard is present
+		if any([device.parent.device_type==u'usb_interface' for device in pyudev.Context().list_devices(subsystem='input') if device.get('ID_INPUT_KEYBOARD', None)]):
+			self.nousb_kernel.set_active(False)
+		else:
+			self.nousb_kernel.set_active(True)
 
 		# Minimal Installation Warning
 		if self.disk_total < 8:
@@ -419,7 +427,7 @@ class Display_Menu:
 
 		## STOCK CONFIGURATIONS (Minimal Install)
 		# Default SSG Profile (DISA STIG)
-		self.profile='xccdf_org.ssgproject.content_profile_stig-rhel7-server-upstream'
+		self.profile='xccdf_org.ssgproject.content_profile_stig-rhel7-disa'
 		# Post Configuration (nochroot)
 		f = open('/tmp/hardening-post-nochroot','w')
 		f.write('')
@@ -469,7 +477,7 @@ class Display_Menu:
 
 		# Define SSG Security Profile
 		if int(self.system_security.get_active()) == 0:
-			self.profile='xccdf_org.ssgproject.content_profile_stig-rhel7-server-upstream'
+			self.profile='xccdf_org.ssgproject.content_profile_stig-rhel7-disa'
 
 		################################################################################################################
 		# Minimal (Defualts to Kickstart)
@@ -926,7 +934,7 @@ class Display_Menu:
         def apply_configuration(self,args):
 
 		# FIPS 140-2 Configuration
-		if self.fips_kernel.get_active() == True:	
+		if self.fips_kernel.get_active() == True:			
 			f = open('/tmp/hardening-post','a')
 			# Enable FIPS 140-2 mode in Kernel
 			f.write('\n/root/hardening/fips-kernel-mode.sh\n')
@@ -935,17 +943,23 @@ class Display_Menu:
 			f = open('/tmp/hardening-post','a')
 			# Disable FIPS 140-2 mode in Kernel
 			f.write('\ngrubby --update-kernel=ALL --remove-args="fips=1"\n')
-			f.write('\n/usr/bin/sed -i "s/ fips=1//" /etc/defualt/grub\n')
+			f.write('\n/usr/bin/sed -i "s/ fips=1//" /etc/default/grub\n')
 			f.close()
 
 		# Disable USB (nousb kernel option)
-		if self.fips_kernel.get_active() == False:		
+		if self.nousb_kernel.get_active() == True:
+			f = open('/tmp/hardening-post','a')
+			# Enable nousb mode in Kernel
+			f.write('\ngrubby --update-kernel=ALL --args="nousb"\n')
+			f.write('\n/usr/bin/sed -i "s/ quiet/quiet nousb/" /etc/default/grub\n')
+			f.close()
+		else:
 			f = open('/tmp/hardening-post','a')
 			# Disable nousb mode in Kernel
 			f.write('\ngrubby --update-kernel=ALL --remove-args="nousb"\n')
 			f.write('\n/usr/bin/sed -i "s/ nousb//" /etc/default/grub\n')
 			f.close()
-
+			
 		# Set system password
 		while True:
 			self.get_password(self.window)
@@ -959,7 +973,7 @@ class Display_Menu:
 					self.MessageBox(self.window,"<b>Password too short! 15 Characters Required.</b>",gtk.MESSAGE_ERROR)
 			else:
 				self.MessageBox(self.window,"<b>Passwords Don't Match!</b>",gtk.MESSAGE_ERROR)
-			
+
                 self.error = 0
 
 		if self.verify.check_hostname(self.hostname.get_text()) == False:
@@ -998,6 +1012,9 @@ class Display_Menu:
 			self.salt = '$6$'+self.salt
 			self.password = crypt.crypt(self.passwd,self.salt)
 
+                        # Quote Password
+                        self.quoted_password = '"%s"' % self.passwd.replace('\\','\\\\').replace('"','\\"')
+
 			# Write Classification Banner Settings
 			f = open('/tmp/classification-banner','w')
 			f.write('message = "'+str(self.system_classification.get_active_text())+'"\n')
@@ -1027,8 +1044,8 @@ class Display_Menu:
 			# Write Kickstart Configuration
 			f = open('/tmp/hardening','w')
 			f.write('network --hostname '+self.hostname.get_text()+' \n')
-			f.write('rootpw --iscrypted '+str(self.password)+' --lock\n')
-                        f.write('bootloader --location=mbr --driveorder='+str(self.data["INSTALL_DRIVES"])+' --append="crashkernel=auto rhgb quiet audit=1" --password='+str(self.a)+'\n')
+			f.write('rootpw --iscrypted '+str(self.password)+(' --lock' if self.lock_root.get_active() == True else '')+'\n')
+                        f.write('bootloader --location=mbr --driveorder='+str(self.data["INSTALL_DRIVES"])+' --append="crashkernel=auto rhgb quiet audit=1" --password='+self.quoted_password+'\n')
 			f.write('user --name=admin --groups=wheel --password='+str(self.password)+' --iscrypted \n')
 			f.close()
 			f = open('/tmp/partitioning','w')
@@ -1037,24 +1054,24 @@ class Display_Menu:
 			f.write('zerombr\n')
 			f.write('clearpart --all --drives='+str(self.data["INSTALL_DRIVES"])+'\n')
 			if self.encrypt_disk.get_active() == True:
-				f.write('part pv.01 --grow --size=200 --encrypted --cipher=\'aes-xts-plain64\' --passphrase='+str(self.passwd)+'\n')
+				f.write('part pv.01 --grow --size=200 --encrypted --cipher=\'aes-xts-plain64\' --passphrase='+self.quoted_password+'\n')
 			else:
 				f.write('part pv.01 --grow --size=200\n')
 			f.write('part /boot --fstype=xfs --size=1024\n')
 			f.write('volgroup vg1 --pesize=4096 pv.01\n')
 			if os.path.isdir('/sys/firmware/efi'):
 				f.write('part /boot/efi --fstype=efi --size=200\n')
-			f.write('logvol / --fstype=xfs --name=lv_root --vgname=vg1 --grow --percent='+str(self.root_partition.get_value_as_int())+'\n')
-			f.write('logvol /home --fstype=xfs --name=lv_home --vgname=vg1 --grow --percent='+str(self.home_partition.get_value_as_int())+'\n')
-			f.write('logvol /tmp --fstype=xfs --name=lv_tmp --vgname=vg1 --grow --percent='+str(self.tmp_partition.get_value_as_int())+'\n')
-			f.write('logvol /var --fstype=xfs --name=lv_var --vgname=vg1 --grow --percent='+str(self.var_partition.get_value_as_int())+'\n')
-			f.write('logvol /var/log --fstype=xfs --name=lv_log --vgname=vg1 --grow --percent='+str(self.log_partition.get_value_as_int())+'\n')
-			f.write('logvol /var/log/audit --fstype=xfs --name=lv_audit --vgname=vg1 --grow --percent='+str(self.audit_partition.get_value_as_int())+'\n')
-			f.write('logvol swap --fstype=swap --name=lv_swap --vgname=vg1 --maxsize=4096 --grow --percent='+str(self.swap_partition.get_value_as_int())+'\n')
+			f.write('logvol / --fstype=xfs --name=lv_root --vgname=vg1 --percent='+str(self.root_partition.get_value_as_int())+'\n')
+			f.write('logvol /home --fstype=xfs --name=lv_home --vgname=vg1 --percent='+str(self.home_partition.get_value_as_int())+'\n')
+			f.write('logvol /tmp --fstype=xfs --name=lv_tmp --vgname=vg1 --percent='+str(self.tmp_partition.get_value_as_int())+'\n')
+			f.write('logvol /var --fstype=xfs --name=lv_var --vgname=vg1 --percent='+str(self.var_partition.get_value_as_int())+'\n')
+			f.write('logvol /var/log --fstype=xfs --name=lv_log --vgname=vg1 --percent='+str(self.log_partition.get_value_as_int())+'\n')
+			f.write('logvol /var/log/audit --fstype=xfs --name=lv_audit --vgname=vg1 --percent='+str(self.audit_partition.get_value_as_int())+'\n')
+			f.write('logvol swap --fstype=swap --name=lv_swap --vgname=vg1 --maxsize=4096 --percent='+str(self.swap_partition.get_value_as_int())+'\n')
 			if self.opt_partition.get_value_as_int() >= 1:
-				f.write('logvol /opt --fstype=xfs --name=lv_opt --vgname=vg1 --grow --percent='+str(self.opt_partition.get_value_as_int())+'\n')
+				f.write('logvol /opt --fstype=xfs --name=lv_opt --vgname=vg1 --percent='+str(self.opt_partition.get_value_as_int())+'\n')
 			if self.www_partition.get_value_as_int() >= 1:
-				f.write('logvol /var/www --fstype=xfs --name=lv_www --vgname=vg1 --grow --percent='+str(self.www_partition.get_value_as_int())+'\n')
+				f.write('logvol /var/www --fstype=xfs --name=lv_www --vgname=vg1 --percent='+str(self.www_partition.get_value_as_int())+'\n')
 			f.close()
 			gtk.main_quit()
 
